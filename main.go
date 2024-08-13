@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"golang.org/x/time/rate" // Import the rate limiting package
 )
 
 type Underlying struct {
@@ -137,24 +139,40 @@ func main() {
 
 	fmt.Printf("Fetching options data for %d stocks\n", len(stockTickers))
 
-	// This is where we will store all the options we fetch
-	options := []Option{}
+	// Create a rate limiter: 120 requests per minute
+	// rate.Every(time.Second/2) creates a rate of 2 tokens per second (120 per minute)
+	// The second argument '1' is the burst size, allowing occasional bursts of 1 additional request
+	limiter := rate.NewLimiter(rate.Limit(120), 120)
 
-	// This is a channel that we will use to send the options data back to the main goroutine
-	c := make(chan []Option)
+	// This limiter ensures that, on average, we don't exceed 120 requests per minute.
+	// It does this by distributing the allowed requests evenly across time,
+	// rather than allowing all 120 requests to be made at the start of each minute.
 
-	// For each stock make a call to get its options
+	// Create channels for jobs and results
+	// These channels facilitate communication between the main goroutine and worker goroutines
+	jobs := make(chan string, len(stockTickers))      // Channel to send stock tickers to workers
+	results := make(chan []Option, len(stockTickers)) // Channel to receive processed options from workers
+
+	// Create worker pool
+	numWorkers := 10 // Adjust this number based on your needs and system capabilities
+	// Launch multiple worker goroutines to process jobs concurrently
+	for i := 0; i < numWorkers; i++ {
+		go worker(jobs, results, limiter, apiKey)
+	}
+
+	// Send jobs (stock tickers) to the worker pool
 	for _, stock := range stockTickers {
-		go getOptionsData(stock, apiKey, c)
+		jobs <- stock
 	}
+	close(jobs) // Close the jobs channel to signal that no more jobs will be sent
 
-	// Wait for all the options to be fetched
+	// Collect results from all workers
+	var options []Option
 	for i := 0; i < len(stockTickers); i++ {
-		contracts := <-c
-		options = append(options, contracts...)
+		options = append(options, <-results...)
 	}
 
-	// Sort the options data by IV Descending
+	// Sort and print results
 	sort.Slice(options, func(i, j int) bool {
 		return options[i].Volatility > options[j].Volatility
 	})
@@ -185,8 +203,30 @@ func main() {
 	}
 }
 
-func getOptionsData(stock string, apiKey string, c chan []Option) {
+// worker function: handles processing for individual stocks
+// It receives jobs from the jobs channel, processes them, and sends results to the results channel
+// The rate limiter is passed to each worker to ensure that all workers collectively adhere to the rate limit
+func worker(jobs <-chan string, results chan<- []Option, limiter *rate.Limiter, apiKey string) {
+	// The for range loop automatically terminates when the jobs channel is both closed and empty.
+	// Once this loop exits, the worker function ends, and the goroutine terminates.
+	for stock := range jobs {
+		// Wait for rate limit
+		// limiter.Wait() blocks until a token is available
+		// This ensures that we don't exceed our rate limit across all workers
+		err := limiter.Wait(context.Background())
+		if err != nil {
+			// If the context is canceled or times out, we'll get an error here
+			log.Printf("Rate limiter error: %v", err)
+			continue
+		}
 
+		// Once we've acquired a token, we can proceed with the API call
+		options := getOptionsData(stock, apiKey)
+		results <- options
+	}
+}
+
+func getOptionsData(stock, apiKey string) []Option {
 	now := time.Now()
 	start := now.AddDate(0, 3, 0)
 	dateFormat := "2006-01-02"
@@ -197,9 +237,12 @@ func getOptionsData(stock string, apiKey string, c chan []Option) {
 
 	optionsChainURL := fmt.Sprintf("https://api.schwabapi.com/marketdata/v1/chains?symbol=%s&includeUnderlyingQuote=true&range=NTM&fromDate=%s&toDate=%s", stock, startDate, endDate)
 
+	// Note: We don't need explicit rate limiting here because the worker function
+	// already ensures that this function is called at the appropriate rate
 	req, err := http.NewRequest("GET", optionsChainURL, nil)
 	if err != nil {
-		log.Fatalf("Error creating request: %v", err)
+		log.Printf("Error creating request for %s: %v", stock, err)
+		return nil
 	}
 
 	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", apiKey))
@@ -207,24 +250,27 @@ func getOptionsData(stock string, apiKey string, c chan []Option) {
 	client := &http.Client{}
 	res, err := client.Do(req)
 	if err != nil {
-		log.Fatalf("Error making API call: %v", err)
+		log.Printf("Error making API call for %s: %v", stock, err)
+		return nil
 	}
 	defer res.Body.Close()
 
 	resBody, err := io.ReadAll(res.Body)
 	if err != nil {
-		log.Fatalf("Could not read response body: %v", err)
+		log.Printf("Could not read response body for %s: %v", stock, err)
+		return nil
 	}
 	if res.StatusCode != 200 {
-		fmt.Printf("Call for %s failed", stock)
 		fmt.Println(string(resBody))
-		log.Fatalf("API Key expired")
+		log.Printf("Call for %s failed with status code %d", stock, res.StatusCode)
+		return nil
 	}
 
 	var optionsChain OptionsChain
 	err = json.Unmarshal(resBody, &optionsChain)
 	if err != nil {
-		log.Fatalf("Error unmarshaling JSON: %v", err)
+		log.Printf("Error unmarshaling JSON for %s: %v", stock, err)
+		return nil
 	}
 
 	options := []Option{}
@@ -274,6 +320,9 @@ func getOptionsData(stock string, apiKey string, c chan []Option) {
 					PercentChange:          contracts[0].PercentChange,
 					MarkChange:             contracts[0].MarkChange,
 					MarkPercentChange:      contracts[0].MarkPercentChange,
+					IntrinsicValue:         contracts[0].IntrinsicValue,
+					ExtrinsicValue:         contracts[0].ExtrinsicValue,
+					InTheMoney:             contracts[0].InTheMoney,
 				}
 				if option.Volatility > 0 {
 					options = append(options, option)
@@ -281,7 +330,7 @@ func getOptionsData(stock string, apiKey string, c chan []Option) {
 			}
 		}
 	}
-	c <- options
+	return options
 }
 
 func readStocksFile(filename string) ([]string, error) {
