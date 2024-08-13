@@ -140,8 +140,8 @@ func main() {
 	fmt.Printf("Fetching options data for %d stocks\n", len(stockTickers))
 
 	// Create a rate limiter: 120 requests per minute
-	// rate.Every(time.Second/2) creates a rate of 2 tokens per second (120 per minute)
-	// The second argument '1' is the burst size, allowing occasional bursts of 1 additional request
+	// The second argument '120' is the burst size
+	// This allows our program to potentially process all 120 stocks very quickly if the API can handle it
 	limiter := rate.NewLimiter(rate.Limit(120), 120)
 
 	// This limiter ensures that, on average, we don't exceed 120 requests per minute.
@@ -179,27 +179,31 @@ func main() {
 
 	fmt.Printf("Options with the greatest IV\n")
 	for _, option := range options[:20] {
-		fmt.Printf("%-5s (%6.2f) %10s %4s@$%6.2f IV: %5.2f%% Trading at $%4.2f\n",
+		fmt.Printf("%-5s ($%4.2f) %10s %4s@$%.2f IV:%5.2f%% Trading at $%4.2f [%s]\n",
 			option.Symbol,
 			option.LastStockPrice,
 			option.ExpirationDate[:10],
 			option.optionType,
 			option.StrikePrice,
 			option.Volatility,
-			option.Last)
+			option.Last,
+			option.OptionSymbol,
+		)
 	}
 
 	fmt.Printf("\nOptions with the lowest IV\n")
 	for i := 0; i < 20; i++ {
 		option := options[len(options)-1-i]
-		fmt.Printf("%-5s (%6.2f) %10s %4s@$%6.2f IV: %5.2f%% Trading at $%4.2f\n",
+		fmt.Printf("%-5s ($%4.2f) %10s %4s@$%.2f IV:%5.2f%% Trading at $%4.2f [%s]\n",
 			option.Symbol,
 			option.LastStockPrice,
 			option.ExpirationDate[:10],
 			option.optionType,
 			option.StrikePrice,
 			option.Volatility,
-			option.Last)
+			option.Last,
+			option.OptionSymbol,
+		)
 	}
 }
 
@@ -235,7 +239,7 @@ func getOptionsData(stock, apiKey string) []Option {
 	end := now.AddDate(0, 9, 0)
 	endDate := end.Format(dateFormat)
 
-	optionsChainURL := fmt.Sprintf("https://api.schwabapi.com/marketdata/v1/chains?symbol=%s&includeUnderlyingQuote=true&range=NTM&fromDate=%s&toDate=%s", stock, startDate, endDate)
+	optionsChainURL := fmt.Sprintf("https://api.schwabapi.com/marketdata/v1/chains?symbol=%s&includeUnderlyingQuote=true&range=NTM&strikeCount=10&fromDate=%s&toDate=%s", stock, startDate, endDate)
 
 	// Note: We don't need explicit rate limiting here because the worker function
 	// already ensures that this function is called at the appropriate rate
@@ -275,57 +279,60 @@ func getOptionsData(stock, apiKey string) []Option {
 
 	options := []Option{}
 
-	for _, strikes := range optionsChain.CallExpDateMap {
-		for _, contracts := range strikes {
-			if len(contracts) > 0 {
-				option := Option{
-					Symbol:                 stock,
-					Description:            contracts[0].Description,
-					ExchangeName:           contracts[0].ExchangeName,
-					LastStockPrice:         optionsChain.Underlying.Last,
-					stockPercentChange:     optionsChain.Underlying.PercentChange,
-					lastPrice:              contracts[0].Last,
-					fiftyTwoWeekHigh:       optionsChain.Underlying.FiftyTwoWeekHigh,
-					fiftyTwoWeekLow:        optionsChain.Underlying.FiftyTwoWeekLow,
-					optionType:             contracts[0].PutCall,
-					OptionSymbol:           contracts[0].Symbol,
-					Bid:                    contracts[0].Bid,
-					Ask:                    contracts[0].Ask,
-					Last:                   contracts[0].Last,
-					Mark:                   contracts[0].Mark,
-					BidSize:                contracts[0].BidSize,
-					AskSize:                contracts[0].AskSize,
-					BidAskSize:             contracts[0].BidAskSize,
-					LastSize:               contracts[0].LastSize,
-					HighPrice:              contracts[0].HighPrice,
-					LowPrice:               contracts[0].LowPrice,
-					OpenPrice:              contracts[0].OpenPrice,
-					ClosePrice:             contracts[0].ClosePrice,
-					TotalVolume:            contracts[0].TotalVolume,
-					NetChange:              contracts[0].NetChange,
-					Volatility:             contracts[0].Volatility,
-					Delta:                  contracts[0].Delta,
-					Gamma:                  contracts[0].Gamma,
-					Theta:                  contracts[0].Theta,
-					Vega:                   contracts[0].Vega,
-					Rho:                    contracts[0].Rho,
-					OpenInterest:           contracts[0].OpenInterest,
-					TimeValue:              contracts[0].TimeValue,
-					TheoreticalOptionValue: contracts[0].TheoreticalOptionValue,
-					TheoreticalVolatility:  contracts[0].TheoreticalVolatility,
-					StrikePrice:            contracts[0].StrikePrice,
-					ExpirationDate:         contracts[0].ExpirationDate,
-					DaysToExpiration:       contracts[0].DaysToExpiration,
-					LastTradingDay:         contracts[0].LastTradingDay,
-					PercentChange:          contracts[0].PercentChange,
-					MarkChange:             contracts[0].MarkChange,
-					MarkPercentChange:      contracts[0].MarkPercentChange,
-					IntrinsicValue:         contracts[0].IntrinsicValue,
-					ExtrinsicValue:         contracts[0].ExtrinsicValue,
-					InTheMoney:             contracts[0].InTheMoney,
-				}
-				if option.Volatility > 0 {
-					options = append(options, option)
+	optionTypeMaps := []map[string]map[string][]OptionContract{optionsChain.CallExpDateMap, optionsChain.PutExpDateMap}
+	for _, optionTypeMap := range optionTypeMaps {
+		for _, strikes := range optionTypeMap {
+			for _, contracts := range strikes {
+				if len(contracts) > 0 {
+					option := Option{
+						Symbol:                 stock,
+						Description:            contracts[0].Description,
+						ExchangeName:           contracts[0].ExchangeName,
+						LastStockPrice:         optionsChain.Underlying.Last,
+						stockPercentChange:     optionsChain.Underlying.PercentChange,
+						lastPrice:              contracts[0].Last,
+						fiftyTwoWeekHigh:       optionsChain.Underlying.FiftyTwoWeekHigh,
+						fiftyTwoWeekLow:        optionsChain.Underlying.FiftyTwoWeekLow,
+						optionType:             contracts[0].PutCall,
+						OptionSymbol:           contracts[0].Symbol,
+						Bid:                    contracts[0].Bid,
+						Ask:                    contracts[0].Ask,
+						Last:                   contracts[0].Last,
+						Mark:                   contracts[0].Mark,
+						BidSize:                contracts[0].BidSize,
+						AskSize:                contracts[0].AskSize,
+						BidAskSize:             contracts[0].BidAskSize,
+						LastSize:               contracts[0].LastSize,
+						HighPrice:              contracts[0].HighPrice,
+						LowPrice:               contracts[0].LowPrice,
+						OpenPrice:              contracts[0].OpenPrice,
+						ClosePrice:             contracts[0].ClosePrice,
+						TotalVolume:            contracts[0].TotalVolume,
+						NetChange:              contracts[0].NetChange,
+						Volatility:             contracts[0].Volatility,
+						Delta:                  contracts[0].Delta,
+						Gamma:                  contracts[0].Gamma,
+						Theta:                  contracts[0].Theta,
+						Vega:                   contracts[0].Vega,
+						Rho:                    contracts[0].Rho,
+						OpenInterest:           contracts[0].OpenInterest,
+						TimeValue:              contracts[0].TimeValue,
+						TheoreticalOptionValue: contracts[0].TheoreticalOptionValue,
+						TheoreticalVolatility:  contracts[0].TheoreticalVolatility,
+						StrikePrice:            contracts[0].StrikePrice,
+						ExpirationDate:         contracts[0].ExpirationDate,
+						DaysToExpiration:       contracts[0].DaysToExpiration,
+						LastTradingDay:         contracts[0].LastTradingDay,
+						PercentChange:          contracts[0].PercentChange,
+						MarkChange:             contracts[0].MarkChange,
+						MarkPercentChange:      contracts[0].MarkPercentChange,
+						IntrinsicValue:         contracts[0].IntrinsicValue,
+						ExtrinsicValue:         contracts[0].ExtrinsicValue,
+						InTheMoney:             contracts[0].InTheMoney,
+					}
+					if option.Volatility > 0 {
+						options = append(options, option)
+					}
 				}
 			}
 		}
