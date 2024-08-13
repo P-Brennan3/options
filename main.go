@@ -15,10 +15,10 @@ import (
 )
 
 type Underlying struct {
-	percentChange    float64 `json:"percentChange"`
-	lastPrice        float64 `json:"last"`
-	fiftyTwoWeekHigh float64 `json:"fiftyTwoWeekHigh"`
-	fiftyTwoWeekLow  float64 `json:"fiftyTwoWeekLow"`
+	PercentChange    float64 `json:"percentChange"`
+	Last             float64 `json:"last"`
+	FiftyTwoWeekHigh float64 `json:"fiftyTwoWeekHigh"`
+	FiftyTwoWeekLow  float64 `json:"fiftyTwoWeekLow"`
 }
 
 type OptionContract struct {
@@ -160,27 +160,27 @@ func main() {
 	})
 
 	fmt.Printf("Options with the greatest IV\n")
-	for i, option := range options[:10] {
-		fmt.Printf("%d. %s (%s): IV %.2f%%, Stock Price $%.2f, Strike Price $%.2f, Last Option Price $%.2f\n",
-			i+1,
+	for _, option := range options[:20] {
+		fmt.Printf("%s ($%.2f) %s %s@$%.2f IV: %.2f%% Trading at $%.2f\n",
 			option.Symbol,
-			option.ExpirationDate[:10],
-			option.Volatility,
 			option.LastStockPrice,
+			option.ExpirationDate[:10],
+			option.optionType,
 			option.StrikePrice,
+			option.Volatility,
 			option.Last)
 	}
 
 	fmt.Printf("\nOptions with the lowest IV\n")
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 20; i++ {
 		option := options[len(options)-1-i]
-		fmt.Printf("%d. %s (%s): IV %.2f%%, Stock Price $%.2f, Strike Price $%.2f, Last Option Price $%.2f\n",
-			i+1,
+		fmt.Printf("%s ($%.2f) %s %s@$%.2f IV: %.2f%% Trading at $%.2f\n",
 			option.Symbol,
-			option.ExpirationDate[:10],
-			option.Volatility,
 			option.LastStockPrice,
+			option.ExpirationDate[:10],
+			option.optionType,
 			option.StrikePrice,
+			option.Volatility,
 			option.Last)
 	}
 }
@@ -189,10 +189,11 @@ func getOptionsData(stock string, apiKey string, c chan []Option) {
 
 	now := time.Now()
 	start := now.AddDate(0, 3, 0)
-	startDate := start.Format("2006-01-02")
+	dateFormat := "2006-01-02"
+	startDate := start.Format(dateFormat)
 
-	end := now.AddDate(0, 6, 0)
-	endDate := end.Format("2006-01-02")
+	end := now.AddDate(0, 9, 0)
+	endDate := end.Format(dateFormat)
 
 	optionsChainURL := fmt.Sprintf("https://api.schwabapi.com/marketdata/v1/chains?symbol=%s&includeUnderlyingQuote=true&range=NTM&fromDate=%s&toDate=%s", stock, startDate, endDate)
 
@@ -235,11 +236,11 @@ func getOptionsData(stock string, apiKey string, c chan []Option) {
 					Symbol:                 stock,
 					Description:            contracts[0].Description,
 					ExchangeName:           contracts[0].ExchangeName,
-					LastStockPrice:         optionsChain.Underlying.lastPrice,
-					stockPercentChange:     optionsChain.Underlying.percentChange,
+					LastStockPrice:         optionsChain.Underlying.Last,
+					stockPercentChange:     optionsChain.Underlying.PercentChange,
 					lastPrice:              contracts[0].Last,
-					fiftyTwoWeekHigh:       optionsChain.Underlying.fiftyTwoWeekHigh,
-					fiftyTwoWeekLow:        optionsChain.Underlying.fiftyTwoWeekLow,
+					fiftyTwoWeekHigh:       optionsChain.Underlying.FiftyTwoWeekHigh,
+					fiftyTwoWeekLow:        optionsChain.Underlying.FiftyTwoWeekLow,
 					optionType:             contracts[0].PutCall,
 					OptionSymbol:           contracts[0].Symbol,
 					Bid:                    contracts[0].Bid,
