@@ -130,7 +130,7 @@ func main() {
 
 	apiKey := os.Args[1]
 
-	stockTickers, err := readStocksFile("tickers.stocks")
+	stockTickers, err := readStocksFile("more.stocks")
 	if err != nil {
 		log.Fatalf("Error reading stocks file: %v", err)
 	}
@@ -161,7 +161,7 @@ func main() {
 
 	fmt.Printf("Options with the greatest IV\n")
 	for _, option := range options[:20] {
-		fmt.Printf("%s ($%.2f) %s %s@$%.2f IV: %.2f%% Trading at $%.2f\n",
+		fmt.Printf("%-5s (%6.2f) %10s %4s@$%6.2f IV: %5.2f%% Trading at $%4.2f\n",
 			option.Symbol,
 			option.LastStockPrice,
 			option.ExpirationDate[:10],
@@ -174,7 +174,7 @@ func main() {
 	fmt.Printf("\nOptions with the lowest IV\n")
 	for i := 0; i < 20; i++ {
 		option := options[len(options)-1-i]
-		fmt.Printf("%s ($%.2f) %s %s@$%.2f IV: %.2f%% Trading at $%.2f\n",
+		fmt.Printf("%-5s (%6.2f) %10s %4s@$%6.2f IV: %5.2f%% Trading at $%4.2f\n",
 			option.Symbol,
 			option.LastStockPrice,
 			option.ExpirationDate[:10],
