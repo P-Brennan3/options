@@ -159,8 +159,30 @@ func main() {
 		return options[i].Volatility > options[j].Volatility
 	})
 
-	fmt.Printf("Option with the greatest IV %+v", options[0])
+	fmt.Printf("Options with the greatest IV\n")
+	for i, option := range options[:10] {
+		fmt.Printf("%d. %s (%s): IV %.2f%%, Stock Price $%.2f, Strike Price $%.2f, Last Option Price $%.2f\n",
+			i+1,
+			option.Symbol,
+			option.ExpirationDate[:10],
+			option.Volatility,
+			option.LastStockPrice,
+			option.StrikePrice,
+			option.Last)
+	}
 
+	fmt.Printf("\nOptions with the lowest IV\n")
+	for i := 0; i < 10; i++ {
+		option := options[len(options)-1-i]
+		fmt.Printf("%d. %s (%s): IV %.2f%%, Stock Price $%.2f, Strike Price $%.2f, Last Option Price $%.2f\n",
+			i+1,
+			option.Symbol,
+			option.ExpirationDate[:10],
+			option.Volatility,
+			option.LastStockPrice,
+			option.StrikePrice,
+			option.Last)
+	}
 }
 
 func getOptionsData(stock string, apiKey string, c chan []Option) {
@@ -193,6 +215,7 @@ func getOptionsData(stock string, apiKey string, c chan []Option) {
 		log.Fatalf("Could not read response body: %v", err)
 	}
 	if res.StatusCode != 200 {
+		fmt.Printf("Call for %s failed", stock)
 		fmt.Println(string(resBody))
 		log.Fatalf("API Key expired")
 	}
@@ -251,12 +274,13 @@ func getOptionsData(stock string, apiKey string, c chan []Option) {
 					MarkChange:             contracts[0].MarkChange,
 					MarkPercentChange:      contracts[0].MarkPercentChange,
 				}
-				options = append(options, option)
+				if option.Volatility > 0 {
+					options = append(options, option)
+				}
 			}
 		}
 	}
 	c <- options
-	return
 }
 
 func readStocksFile(filename string) ([]string, error) {
