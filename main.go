@@ -145,7 +145,9 @@ func main() {
 		log.Fatalf("Error getting initial token: %v", err)
 	}
 
-	stockTickers, err := readStocksFile("tickers.stocks")
+	listName := os.Args[1]	
+	listName = fmt.Sprintf("%s.stocks", listName)
+	stockTickers, err := readStocksFile(listName)
 	if err != nil {
 		log.Fatalf("Error reading stocks file: %v", err)
 	}
