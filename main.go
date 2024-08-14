@@ -3,17 +3,20 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
-	"golang.org/x/time/rate" // Import the rate limiting package
+	"golang.org/x/time/rate"
 )
 
 type Underlying struct {
@@ -130,7 +133,17 @@ func main() {
 		log.Fatal("Error loading .env file")
 	}
 
-	apiKey := os.Args[1]
+	appKey := os.Getenv("APP_KEY")
+	secretKey := os.Getenv("SECRET_KEY")
+	if appKey == "" || secretKey == "" {
+		log.Fatal("APP_KEY and SECRET_KEY must be set in the environment")
+	}
+
+	// Get the initial access token
+	accessToken, refreshToken, err := getInitialToken(appKey, secretKey)
+	if err != nil {
+		log.Fatalf("Error getting initial token: %v", err)
+	}
 
 	stockTickers, err := readStocksFile("tickers.stocks")
 	if err != nil {
@@ -139,40 +152,26 @@ func main() {
 
 	fmt.Printf("Fetching options data for %d stocks\n", len(stockTickers))
 
-	// Create a rate limiter: 120 requests per minute
-	// The second argument '120' is the burst size
-	// This allows our program to potentially process all 120 stocks very quickly if the API can handle it
 	limiter := rate.NewLimiter(rate.Limit(120), 120)
 
-	// This limiter ensures that, on average, we don't exceed 120 requests per minute.
-	// It does this by distributing the allowed requests evenly across time,
-	// rather than allowing all 120 requests to be made at the start of each minute.
+	jobs := make(chan string, len(stockTickers))
+	results := make(chan []Option, len(stockTickers))
 
-	// Create channels for jobs and results
-	// These channels facilitate communication between the main goroutine and worker goroutines
-	jobs := make(chan string, len(stockTickers))      // Channel to send stock tickers to workers
-	results := make(chan []Option, len(stockTickers)) // Channel to receive processed options from workers
-
-	// Create worker pool
-	numWorkers := 10 // Adjust this number based on your needs and system capabilities
-	// Launch multiple worker goroutines to process jobs concurrently
+	numWorkers := 10
 	for i := 0; i < numWorkers; i++ {
-		go worker(jobs, results, limiter, apiKey)
+		go worker(jobs, results, limiter, accessToken, refreshToken, appKey, secretKey)
 	}
 
-	// Send jobs (stock tickers) to the worker pool
 	for _, stock := range stockTickers {
 		jobs <- stock
 	}
-	close(jobs) // Close the jobs channel to signal that no more jobs will be sent
+	close(jobs)
 
-	// Collect results from all workers
 	var options []Option
 	for i := 0; i < len(stockTickers); i++ {
 		options = append(options, <-results...)
 	}
 
-	// Sort and print results
 	sort.Slice(options, func(i, j int) bool {
 		return options[i].Volatility > options[j].Volatility
 	})
@@ -207,30 +206,98 @@ func main() {
 	}
 }
 
-// worker function: handles processing for individual stocks
-// It receives jobs from the jobs channel, processes them, and sends results to the results channel
-// The rate limiter is passed to each worker to ensure that all workers collectively adhere to the rate limit
-func worker(jobs <-chan string, results chan<- []Option, limiter *rate.Limiter, apiKey string) {
-	// The for range loop automatically terminates when the jobs channel is both closed and empty.
-	// Once this loop exits, the worker function ends, and the goroutine terminates.
+func getInitialToken(appKey, secretKey string) (string, string, error) {
+    authURL := "https://api.schwabapi.com/v1/oauth/authorize"
+    tokenURL := "https://api.schwabapi.com/v1/oauth/token"
+    redirectURL := "https://127.0.0.1"
+
+    // Step 1: Get authorization code
+    authCodeURL := fmt.Sprintf("%s?client_id=%s&redirect_uri=%s", 
+        authURL, appKey, redirectURL)
+
+    fmt.Printf("Visit this URL to authorize the application: %v\n", authCodeURL)
+    fmt.Println("After authorization, you will be redirected. Copy and paste the ENTIRE redirected URL here:")
+
+    var redirectURIWithCode string
+    fmt.Scanln(&redirectURIWithCode)
+
+    parsedURL, err := url.Parse(redirectURIWithCode)
+    if err != nil {
+        return "", "", fmt.Errorf("couldn't parse redirect URI: %v", err)
+    }
+    code := parsedURL.Query().Get("code")
+    if code == "" {
+        return "", "", fmt.Errorf("no code found in redirect URI")
+    }
+
+    // Step 2: Exchange authorization code for tokens
+    data := url.Values{}
+    data.Set("grant_type", "authorization_code")
+    data.Set("code", code)
+    data.Set("redirect_uri", redirectURL)
+
+    req, err := http.NewRequest("POST", tokenURL, strings.NewReader(data.Encode()))
+    if err != nil {
+        return "", "", fmt.Errorf("error creating token request: %v", err)
+    }
+
+    // Set headers
+    req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+    authHeader := base64.StdEncoding.EncodeToString([]byte(appKey + ":" + secretKey))
+    req.Header.Set("Authorization", "Basic "+authHeader)
+
+    client := &http.Client{}
+    resp, err := client.Do(req)
+    if err != nil {
+        return "", "", fmt.Errorf("error exchanging code for token: %v", err)
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK {
+        body, _ := io.ReadAll(resp.Body)
+        return "", "", fmt.Errorf("token exchange failed with status %d: %s", resp.StatusCode, string(body))
+    }
+
+    var result struct {
+        AccessToken  string `json:"access_token"`
+        RefreshToken string `json:"refresh_token"`
+    }
+
+    err = json.NewDecoder(resp.Body).Decode(&result)
+    if err != nil {
+        return "", "", fmt.Errorf("error decoding token response: %v", err)
+    }
+
+    return result.AccessToken, result.RefreshToken, nil
+}
+
+func worker(jobs <-chan string, results chan<- []Option, limiter *rate.Limiter, accessToken, refreshToken, appKey, secretKey string) {
 	for stock := range jobs {
-		// Wait for rate limit
-		// limiter.Wait() blocks until a token is available
-		// This ensures that we don't exceed our rate limit across all workers
 		err := limiter.Wait(context.Background())
 		if err != nil {
-			// If the context is canceled or times out, we'll get an error here
 			log.Printf("Rate limiter error: %v", err)
 			continue
 		}
 
-		// Once we've acquired a token, we can proceed with the API call
-		options := getOptionsData(stock, apiKey)
+		options, newAccessToken, newRefreshToken, err := getOptionsData(stock, accessToken, refreshToken, appKey, secretKey)
+		if err != nil {
+			log.Printf("Error getting options data for %s: %v", stock, err)
+			continue
+		}
+
+		// Update tokens if they've changed
+		if newAccessToken != "" {
+			accessToken = newAccessToken
+		}
+		if newRefreshToken != "" {
+			refreshToken = newRefreshToken
+		}
+
 		results <- options
 	}
 }
 
-func getOptionsData(stock, apiKey string) []Option {
+func getOptionsData(stock, accessToken, refreshToken, appKey, secretKey string) ([]Option, string, string, error) {
 	now := time.Now()
 	start := now.AddDate(0, 3, 0)
 	dateFormat := "2006-01-02"
@@ -241,40 +308,54 @@ func getOptionsData(stock, apiKey string) []Option {
 
 	optionsChainURL := fmt.Sprintf("https://api.schwabapi.com/marketdata/v1/chains?symbol=%s&includeUnderlyingQuote=true&range=NTM&strikeCount=10&fromDate=%s&toDate=%s", stock, startDate, endDate)
 
-	// Note: We don't need explicit rate limiting here because the worker function
-	// already ensures that this function is called at the appropriate rate
 	req, err := http.NewRequest("GET", optionsChainURL, nil)
 	if err != nil {
-		log.Printf("Error creating request for %s: %v", stock, err)
-		return nil
+		return nil, "", "", fmt.Errorf("error creating request for %s: %v", stock, err)
 	}
 
-	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", apiKey))
+	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", accessToken))
 
 	client := &http.Client{}
 	res, err := client.Do(req)
 	if err != nil {
-		log.Printf("Error making API call for %s: %v", stock, err)
-		return nil
+		return nil, "", "", fmt.Errorf("error making API call for %s: %v", stock, err)
 	}
 	defer res.Body.Close()
 
+	if res.StatusCode == http.StatusUnauthorized {
+		// Token might be expired, try to refresh
+		newAccessToken, newRefreshToken, err := refreshTokens(refreshToken, appKey, secretKey)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("error refreshing token: %v", err)
+		}
+
+		// Retry the request with the new access token
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", newAccessToken))
+		res, err = client.Do(req)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("error making API call with refreshed token for %s: %v", stock, err)
+		}
+		defer res.Body.Close()
+
+		if res.StatusCode != http.StatusOK {
+			return nil, "", "", fmt.Errorf("API call failed with status code %d after token refresh", res.StatusCode)
+		}
+
+		accessToken = newAccessToken
+		refreshToken = newRefreshToken
+	} else if res.StatusCode != http.StatusOK {
+		return nil, "", "", fmt.Errorf("API call failed with status code %d", res.StatusCode)
+	}
+
 	resBody, err := io.ReadAll(res.Body)
 	if err != nil {
-		log.Printf("Could not read response body for %s: %v", stock, err)
-		return nil
-	}
-	if res.StatusCode != 200 {
-		fmt.Println(string(resBody))
-		log.Printf("Call for %s failed with status code %d", stock, res.StatusCode)
-		return nil
+		return nil, "", "", fmt.Errorf("could not read response body for %s: %v", stock, err)
 	}
 
 	var optionsChain OptionsChain
 	err = json.Unmarshal(resBody, &optionsChain)
 	if err != nil {
-		log.Printf("Error unmarshaling JSON for %s: %v", stock, err)
-		return nil
+		return nil, "", "", fmt.Errorf("error unmarshaling JSON for %s: %v", stock, err)
 	}
 
 	options := []Option{}
@@ -337,7 +418,49 @@ func getOptionsData(stock, apiKey string) []Option {
 			}
 		}
 	}
-	return options
+	return options, accessToken, refreshToken, nil
+}
+
+func refreshTokens(refreshToken, appKey, secretKey string) (string, string, error) {
+    tokenURL := "https://api.schwabapi.com/oauth2/v1/token"
+
+    data := url.Values{}
+    data.Set("grant_type", "refresh_token")
+    data.Set("refresh_token", refreshToken)
+
+    req, err := http.NewRequest("POST", tokenURL, strings.NewReader(data.Encode()))
+    if err != nil {
+        return "", "", fmt.Errorf("error creating refresh token request: %v", err)
+    }
+
+    // Set headers
+    req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+    authHeader := base64.StdEncoding.EncodeToString([]byte(appKey + ":" + secretKey))
+    req.Header.Set("Authorization", "Basic "+authHeader)
+
+    client := &http.Client{}
+    resp, err := client.Do(req)
+    if err != nil {
+        return "", "", fmt.Errorf("error refreshing token: %v", err)
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK {
+        body, _ := io.ReadAll(resp.Body)
+        return "", "", fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, string(body))
+    }
+
+    var result struct {
+        AccessToken  string `json:"access_token"`
+        RefreshToken string `json:"refresh_token"`
+    }
+
+    err = json.NewDecoder(resp.Body).Decode(&result)
+    if err != nil {
+        return "", "", fmt.Errorf("error decoding refresh response: %v", err)
+    }
+
+    return result.AccessToken, result.RefreshToken, nil
 }
 
 func readStocksFile(filename string) ([]string, error) {
