@@ -186,7 +186,7 @@ func main() {
 			option.optionType,
 			option.StrikePrice,
 			option.Volatility,
-			option.Last,
+			option.Ask,
 			option.OptionSymbol,
 		)
 	}
